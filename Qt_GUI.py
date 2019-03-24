@@ -103,7 +103,7 @@ class Ui_mainWindow(object):
         self.data_proc_button.setText(_translate("mainWindow", "数据处理"))
         self.groupBox_2.setTitle(_translate("mainWindow", "输入stl文件名"))
         self.generate_button.setText(_translate("mainWindow", "生成stl文件"))
-        self.pushButton.setText(_translate("mainWindow", "预览stl文件"))
+        self.pushButton.setText(_translate("mainWindow", "查看stl文件"))
         self.menuF.setTitle(_translate("mainWindow", "File"))
         self.menuView.setTitle(_translate("mainWindow", "View"))
         self.action_openfolder.setText(_translate("mainWindow", "open folder"))

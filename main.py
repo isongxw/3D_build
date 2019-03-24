@@ -2,6 +2,8 @@
 marching_cubes_lewiner函数中的level参数使用的是实际像素值，CT图像中使用的是HU值，在使用level参数时需要将HU值转换为像素值，
 转换公式为 Hu=pixel_val*RescaleSlope+RescaleIntercept，其中RescaleSlope与RescaleIntercept都是DICOM文件中的tag值，
 此次使用的数据中RescaleSlope=1，RescaleIntercept=-1024，因此mimics中骨骼HU值为226，转换为level值为1250.
+
+measure.label()函数 默认情况下标记像素值0为背景像素，并标记他们为0
 '''
 
 import datetime
@@ -9,7 +11,7 @@ from skimage import measure
 from stl import mesh
 from PyQt5 import QtWidgets, QtGui
 import sys
-from PyQt5.QtWidgets import QFileDialog, QMessageBox
+from PyQt5.QtWidgets import QFileDialog, QMessageBox, QApplication
 import Qt_GUI
 import numpy as np
 import pydicom
@@ -52,6 +54,21 @@ def smooth_data(image, sel):
     return temp
 
 
+def region_grow(img, cnct = 2):
+    img = measure.label(img, connectivity=cnct)
+    max_num = 0
+    max_label = -1
+    max_region = np.max(img)
+    for i in range(1, max_region + 1):
+        if np.sum(img==i) > max_num:
+            max_num = np.sum(img==i)
+            max_label = i
+            QApplication.processEvents()
+    result = img==max_label
+    result = result*255
+    return result
+
+
 def resample(image, scan, new_spacing):
     # Determine current pixel spacing
     spacing = map(float, ([scan[0].SliceThickness] + list(scan[0].PixelSpacing)))
@@ -63,12 +80,12 @@ def resample(image, scan, new_spacing):
     real_resize_factor = new_shape / image.shape
     new_spacing = spacing / real_resize_factor
     image = scipy.ndimage.interpolation.zoom(image, real_resize_factor)
-    return image, new_spacing
+    return image
 
 
 def make_mesh(image, step_size=1):
     p = image.transpose(2, 1, 0)
-    verts, faces , d , e= measure.marching_cubes_lewiner(p, step_size=step_size, allow_degenerate=True)
+    verts, faces , d , e= measure.marching_cubes_lewiner(p, level = 100, allow_degenerate=True)
     return verts, faces
 
 
@@ -97,7 +114,6 @@ def preview(stl_name):
     renWin = vtk.vtkRenderWindow()  # 将操作系统与VTK渲染引擎连接到一起。
     renWin.AddRenderer(renderer)
     renWin.SetSize(800, 800)
-    renWin.SetW
     iren = vtk.vtkRenderWindowInteractor()  # 提供平台独立的响应鼠标、键盘和时钟事件的交互机制
     iren.SetRenderWindow(renWin)
     # 交互器样式的一种，该样式下，用户是通过控制相机对物体作旋转、放大、缩小等操作
@@ -146,12 +162,15 @@ class mywindows(QtWidgets.QMainWindow, Qt_GUI.Ui_mainWindow):
             patient = load_scan(self.data_path, self.fileList)
             add_log(self, "数据扫描完成")
             imgs_to_process = np.stack([s.pixel_array for s in patient])
+            add_log(self, "正在进行数据预处理...")
+            imgs_to_smooth= region_grow(imgs_to_process, 2)
+            add_log(self, "数据预处理完成")
             add_log(self, "正在进行数据平滑...")
-            imgs_after_smooth = smooth_data(imgs_to_process, self.smooth_sel)
+            imgs_after_smooth = smooth_data(imgs_to_smooth, self.smooth_sel)
             add_log(self, "数据平滑完成，数据平滑方式为:"+ str(self.smooth_sel))
-            add_log(self, "正在进行resample...")
-            imgs_after_resamp, spacing = resample(imgs_after_smooth, patient, [1, 1, 1])
-            add_log(self, "resample完成")
+            add_log(self, "正在进行数据重采样...")
+            imgs_after_resamp = resample(imgs_after_smooth, patient, [1, 1, 1])
+            add_log(self, "数据重采样完成")
             np.save("imgs_after_resamp.npy", imgs_after_resamp)
             add_log(self, "数据处理完成")
             QMessageBox.information(self, "数据处理", "数据处理完成", QMessageBox.Ok)
