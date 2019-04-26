@@ -24,19 +24,22 @@ import scipy.ndimage
 from glob import glob
 from scipy.ndimage import gaussian_filter, median_filter
 import vtk
+from anisotropic_diffusion import anisodiff2D
+from medpy.filter.smoothing import anisotropic_diffusion
 
 sec = 0
 data_path = ""
 smooth_sel = 0
 fileList = []
 timer = QTimer()
+default_path = os.path.abspath('.')
+default_name = 'preview.stl'
+func_type = ""      # 调用PDThread类的函数
+dstfile = ""        # 生成的stl文件名
 
 def add_log(self, log):
     self.console_browser.append(datetime.datetime.now().strftime('%y-%b-%d'
                                                                  ' %H:%M:%S') + ': ' + str(log))
-    #QtWidgets.QApplication.processEvents()
-
-
 def load_scan(path, fileList):
     slices = [pydicom.dcmread(s) for s in fileList]
     slices.sort(key=lambda x: int(x.InstanceNumber), reverse=True)  # 将slices按照.dcm文件的InstanceNumber属性进行排序
@@ -50,6 +53,14 @@ def load_scan(path, fileList):
     return slices
 
 
+def anisotropic(img3D):
+    diff = anisodiff2D()
+    temp = np.zeros_like(img3D)
+    for i in range(img3D.shape[0]):
+        temp[i] = diff.fit(img3D[i])
+    return temp
+
+
 def smooth_data(image, sel):
     if (sel == 0):
         return image
@@ -57,24 +68,36 @@ def smooth_data(image, sel):
         temp = np.zeros(shape=image.shape)
         for thickness in range(image.shape[0]):
             temp[thickness] = gaussian_filter(image[thickness], sigma=1)
-    else:
+    if (sel == 2):
         temp = gaussian_filter(image,1)
+    else:
+        temp = anisotropic_diffusion(image, niter = 5, kappa=300)
 
     return temp
 
 
 def region_grow(img, cnct = 2):
-    img = measure.label(img, connectivity=cnct)
-    max_num = 0
-    max_label = -1
-    max_region = np.max(img)
-    for i in range(1, max_region + 1):
-        if np.sum(img==i) > max_num:
-            max_num = np.sum(img==i)
-            max_label = i
-            QApplication.processEvents()
-    result = img==max_label
-    result = result*255
+    #img = img*(img>1250)
+    result = np.zeros_like(img)
+    print('label')
+    img1 = measure.label(img, connectivity=cnct)
+    print('region_grow')
+    res = measure.regionprops(img1)
+    print('rg fin')
+    max_label = 0
+    max_area = 0
+    for re in res:
+        if re.area > max_area:
+            max_area = re.area
+            max_label = re.label
+    # for i in range(img.shape[0]):
+    #     for j in range(img.shape[1]):
+    #         for k in range(img.shape[2]):
+    #             if img1[i][j][k] == max_label:
+    #                 result[i][j][k] = img[i][j][k]
+    #
+    result = img1==max_label
+    result = result*img
     return result
 
 
@@ -145,12 +168,10 @@ def preview(stl_name):
     del iren
 
 
-class WorkThread(QThread):
-    # 定义一个新的线程类
-    trigger = pyqtSignal()
-
+class DPThread(QThread):
+    # 定义一个新的线程类用于数据处理
     def __int__(self):
-        super(WorkThread, self).__init__()
+        super(DPThread, self).__init__()
 
     def run(self):
         # 重写run函数，进程start()时调用run()函数
@@ -166,10 +187,9 @@ class WorkThread(QThread):
         print("数据预处理完成")
         print("正在进行数据平滑...")
         imgs_after_smooth = smooth_data(imgs_to_smooth, smooth_sel)
-        #add_log(self, "数据平滑完成，数据平滑方式为:" + str(self.smooth_sel))
-        #add_log(self, "正在进行数据重采样...")
+        print("数据平滑完成")
+        print("正在进行数据重采样...")
         imgs_after_resamp = resample(imgs_after_smooth, patient, [1, 1, 1])
-        # imgs_after_resamp = imgs_after_smooth
         print("数据重采样完成")
         # 在三维数据的顶部与底部添加全0的二维数组，人为创建等值面进行三维重建以填补空白
         zero = np.zeros_like(imgs_after_resamp[0])
@@ -180,42 +200,97 @@ class WorkThread(QThread):
         imgs_after_resamp = np.array(imgs_after_resamp)
         np.save("imgs_after_resamp.npy", imgs_after_resamp)
         print("数据处理完成")
-        self.trigger.emit()
+
+
+class PDThread(QThread):
+    # 定义一个新的线程类用于3D预览
+    def __int__(self):
+        global stl_finished
+        stl_finished = False
+        super(PDThread, self).__init__()
+
+    def run(self):
+        # 重写run函数，进程start()时调用run()函数
+        global default_name
+        global default_path
+        imgs_used = np.load("imgs_after_resamp.npy")
+        v, f = make_mesh(imgs_used)
+        three_d_print(v, f, default_path, default_name)
+        
+
 
 class mywindows(QtWidgets.QMainWindow, Qt_GUI.Ui_mainWindow):
 
-    default_path = os.path.abspath('.')
-    default_name = 'preview.stl'
-    work = WorkThread()
+    dp_work = DPThread()
+    pd_work = PDThread()
 
     def __init__(self):
         super(mywindows, self).__init__()
-        self.setupUi(self)
+        self.setupUi(self)# 捕获进程结束信号
+        self.dp_work.finished.connect(self.dp_end)
+        self.pd_work.finished.connect(self.pd_end)
+        # 捕获一次计时结束信号
+        timer.timeout.connect(self.countTime)
 
     def countTime(self):
         # 每经过一秒进行一次处理
         global sec
         sec += 1
         self.lcdNumber.display(sec)
-        if sec < 297:
+        if sec < 34:
             # 每经过三秒进度条加一，按照经验来看，数据处理一般在300秒之内
-            self.progressBar.setValue(int(sec / 3))
+            self.progressBar.setValue(int(sec * 3))
 
-    def workEnd(self):
+    def dp_end(self):
         # 线程完成后的工作
         global timer
         global sec
         sec = 0
         timer.stop()
         self.progressBar.setValue(100)
-        add_log(self, "数据处理完成，用时:" + str(self.lcdNumber.value()) + "秒")
+        add_log(self, "数据处理完成，用时: " + str(self.lcdNumber.value()) + "秒")
         QMessageBox.information(self, "数据处理", "数据处理完成", QMessageBox.Ok)
+        self.dp_work.quit()
+        self.dp_work.wait()
+        self.lcdNumber.display(0)
+        self.progressBar.setValue(0)
         self.progressBar.setVisible(False)
+        self.lcdNumber.setVisible(False)
         self.pushButton.setEnabled(True)
+        self.generate_button.setEnabled(True)
+
+    def pd_end(self):
+        global timer
+        global sec
+        global func_type
+        global dstfile
+        global default_name
+        global default_path
+
+        sec = 0
+        timer.stop()
+        self.progressBar.setValue(100)
+        self.pd_work.quit()
+        self.pd_work.wait()
+        add_log(self, "生成STL缓存文件完成，用时: " + str(self.lcdNumber.value()) + "秒")
+        if(func_type == "preview"):
+            filename = default_path + '/' + default_name
+            preview(filename)
+        elif(func_type == "generate"):
+            srcfile = default_path + '/' + default_name
+            copyfile(srcfile, dstfile)
+            os.remove(srcfile)
+            add_log(self, "生成stl文件完成")
+            QMessageBox.information(self, "生成stl", "生成stl文件完成", QMessageBox.Ok)
+        self.lcdNumber.display(0)
+        self.progressBar.setValue(0)
+        self.progressBar.setVisible(False)
+        self.lcdNumber.setVisible(False)
 
     def get_smooth(self, sel):
         global smooth_sel
         smooth_sel = sel
+
     def get_path(self):
         global data_path
         global fileList
@@ -229,9 +304,14 @@ class mywindows(QtWidgets.QMainWindow, Qt_GUI.Ui_mainWindow):
             QMessageBox.information(self, "文件扫描", "文件扫描完成，包含%d个.dcm文件" % (len(fileList)), QMessageBox.Ok)
             add_log(self, "文件扫描完成，包含%d个.dcm文件" % (len(fileList)))
 
-
     def data_proc(self):
         global timer
+        global default_name
+        global default_path
+        srcfile = default_path + '/' + default_name
+        if os.path.isfile(srcfile):
+            # 删除上次操作时生成的stl文件
+            os.remove(srcfile)
         if(data_path == ""):
             QMessageBox.warning(self, "warning", "未选择文件夹", QMessageBox.Ok)
         else:
@@ -239,36 +319,53 @@ class mywindows(QtWidgets.QMainWindow, Qt_GUI.Ui_mainWindow):
             # 开始计时，时长为1s
             timer.start(1000)
             # 启动线程
-            self.work.start()
+            self.dp_work.start()
             self.progressBar.setVisible(True)
-            # 捕获进程结束信号
-            self.work.trigger.connect(self.workEnd)
-            # 捕获一次计时结束信号
-            timer.timeout.connect(self.countTime)
-
+            self.lcdNumber.setVisible(True)
 
     def generate_stl(self):
         # 生成stl
+        global default_path
+        global default_name
+        global dstfile
+        global func_type
+        func_type = "generate"
         stl_path = QFileDialog.getExistingDirectory(self, "choose output directory", "./")
-        add_log(self, "输出文件路径为: " + stl_path)
         stl_name = self.filename_edit.text()
-        srcfile = self.default_path + '/' + self.default_name
-        dstfile = stl_path + '/' + stl_name + '.stl'
         if(stl_name == ""):
             QMessageBox.warning(self, "warning", "未输入.stl文件名", QMessageBox.Ok)
-        else:
+            return
+        add_log(self, "输出文件路径为: " + stl_path)
+        srcfile = default_path + '/' + default_name
+        dstfile = stl_path + '/' + stl_name + '.stl'
+        if os.path.isfile(srcfile):
+            # 预览时生成的.stl文件存在，直接将预览时生成的文件copy，copy完成后删除预览stl文件
             copyfile(srcfile, dstfile)
-            add_log(self, "生成stl文件完成")
-            QMessageBox.information(self, "生成stl", "生成stl文件完成", QMessageBox.Ok)
+            os.remove(srcfile)
+        else:
+            # 生成.stl文件
+            global timer
+            add_log(self, "正在生成缓存文件...")
+            # 开始计时
+            timer.start(1000)
+            # 启动线程
+            self.pd_work.start()
+            self.progressBar.setVisible(True)
+            self.lcdNumber.setVisible(True)
 
     def preview_3D(self):
-        imgs_used = np.load("imgs_after_resamp.npy")
-        add_log(self, "正在生成预览...")
-        v, f = make_mesh(imgs_used)
-        three_d_print(v, f, self.default_path, self.default_name)
-        filename = self.default_path + '/' + self.default_name
-        preview(filename)
-
+        global timer
+        global default_name
+        global default_path
+        global func_type
+        func_type = "preview"
+        add_log(self, "正在生成缓存文件...")
+        # 开始计时
+        timer.start(1000)
+        # 启动线程
+        self.pd_work.start()
+        self.progressBar.setVisible(True)
+        self.lcdNumber.setVisible(True)
 
 app = QtWidgets.QApplication(sys.argv)
 window = mywindows()
