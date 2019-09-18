@@ -24,9 +24,8 @@ import scipy.ndimage
 from glob import glob
 from scipy.ndimage import gaussian_filter, median_filter
 import vtk
-from anisotropic_diffusion import anisodiff2D
+# from anisotropic_diffusion import anisodiff2D
 from medpy.filter.smoothing import anisotropic_diffusion
-
 sec = 0
 data_path = ""
 smooth_sel = 0
@@ -36,13 +35,18 @@ default_path = os.path.abspath('.')
 default_name = 'preview.stl'
 func_type = ""      # 调用PDThread类的函数
 dstfile = ""        # 生成的stl文件名
+ImageOrientation = []   # 图像方向,格式为六个数组成的list，前三个表示第一行相对于患者在x,y,z三个方向上的余弦值，
+                        # 后三个表示第一列相对于患者在x,y,z三个方向上的余弦值，由于第一行垂直于y轴，且为二维数据，
+                        # 所以在前三个之后x方向上有值，同理后三个只有y方向上有值。
 
 def add_log(self, log):
     self.console_browser.append(datetime.datetime.now().strftime('%y-%b-%d'
                                                                  ' %H:%M:%S') + ': ' + str(log))
 def load_scan(path, fileList):
+    global ImageOrientation
     slices = [pydicom.dcmread(s) for s in fileList]
     slices.sort(key=lambda x: int(x.InstanceNumber), reverse=True)  # 将slices按照.dcm文件的InstanceNumber属性进行排序
+    ImageOrientation = slices[0].ImageOrientationPatient
     try:
         slice_thickness = np.abs(slices[0].ImagePositionPatient[2] - slices[1].ImagePositionPatient[2])
     except:
@@ -51,14 +55,6 @@ def load_scan(path, fileList):
         s.SliceThickness = slice_thickness
 
     return slices
-
-
-def anisotropic(img3D):
-    diff = anisodiff2D()
-    temp = np.zeros_like(img3D)
-    for i in range(img3D.shape[0]):
-        temp[i] = diff.fit(img3D[i])
-    return temp
 
 
 def smooth_data(image, sel):
@@ -77,7 +73,8 @@ def smooth_data(image, sel):
 
 
 def region_grow(img, cnct = 2):
-    #img = img*(img>1250)
+    print(img.max())
+    img = 3000*(img>=1250)
     result = np.zeros_like(img)
     print('label')
     img1 = measure.label(img, connectivity=cnct)
@@ -90,22 +87,20 @@ def region_grow(img, cnct = 2):
         if re.area > max_area:
             max_area = re.area
             max_label = re.label
-    # for i in range(img.shape[0]):
-    #     for j in range(img.shape[1]):
-    #         for k in range(img.shape[2]):
-    #             if img1[i][j][k] == max_label:
-    #                 result[i][j][k] = img[i][j][k]
-    #
+    print(max_label, max_area)
     result = img1==max_label
     result = result*img
     return result
 
 
+
+
 def resample(image, scan, new_spacing):
     # Determine current pixel spacing
-    spacing = map(float, ([scan[0].SliceThickness] + list(scan[0].PixelSpacing)))
-    spacing = np.array(list(spacing))
+    spacing = map(float, (list(scan[0].PixelSpacing)) + [scan[0].SliceThickness])
 
+    spacing = np.array(list(spacing))
+    print(spacing)
     resize_factor = spacing / new_spacing
     new_real_shape = image.shape * resize_factor
     new_shape = np.round(new_real_shape)
@@ -116,8 +111,14 @@ def resample(image, scan, new_spacing):
 
 
 def make_mesh(image, step_size=1):
-    p = image.transpose(2, 1, 0)
-    verts, faces= measure.marching_cubes_classic(p)
+    global ImageOrientation
+    p = image
+    if ImageOrientation[0] > 0 and ImageOrientation[4] > 0:
+        p = image.transpose(1, 0, 2)
+    # elif ImageOrientation[0] < 0 and ImageOrientation[4] < 0:
+    #     p = image
+
+    verts, faces, n, v= measure.marching_cubes_lewiner(p, 1250)
     return verts, faces
 
 
@@ -181,7 +182,7 @@ class DPThread(QThread):
         print("正在扫描数据...")
         patient = load_scan(data_path, fileList)
         print("数据扫描完成")
-        imgs_to_process = np.stack([s.pixel_array for s in patient])
+        imgs_to_process = np.stack([s.pixel_array for s in patient], axis=2)
         print("正在进行数据预处理...")
         imgs_to_smooth = region_grow(imgs_to_process, 2)
         print("数据预处理完成")
@@ -192,14 +193,16 @@ class DPThread(QThread):
         imgs_after_resamp = resample(imgs_after_smooth, patient, [1, 1, 1])
         print("数据重采样完成")
         # 在三维数据的顶部与底部添加全0的二维数组，人为创建等值面进行三维重建以填补空白
-        zero = np.zeros_like(imgs_after_resamp[0])
-        imgs_after_resamp = imgs_after_resamp.tolist()
-        zero = zero.tolist()
-        imgs_after_resamp.append(zero)
-        imgs_after_resamp.insert(0, zero)
-        imgs_after_resamp = np.array(imgs_after_resamp)
+        zero = np.zeros((imgs_after_resamp.shape[0], imgs_after_resamp.shape[1]))
+        imgs_after_resamp = np.insert(imgs_after_resamp, 0, zero, axis=2)
+        imgs_after_resamp = np.insert(imgs_after_resamp, imgs_after_resamp.shape[2], zero, axis=2)
+        print(imgs_after_resamp.shape)
+        # imgs_after_resamp = imgs_after_resamp.tolist()
+        # zero = zero.tolist()
+        # imgs_after_resamp.append(zero)
+        # imgs_after_resamp.insert(0, zero)
+        # imgs_after_resamp = np.array(imgs_after_resamp)
         np.save("imgs_after_resamp.npy", imgs_after_resamp)
-        print("数据处理完成")
 
 
 class PDThread(QThread):
